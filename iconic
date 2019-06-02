@@ -1,0 +1,1153 @@
+#!/bin/bash
+
+# NAME: iconic
+# CALL: "iconic --geometry=wxh+x+y icon" to open GUI setup window
+#       "iconic name" to set Xrandr monitor name with icons and no GUI appears
+
+# DESC: Simple GUI script to set Desktop icons evenly on monitor
+#       For Ask Ubuntu Question:
+#       https://askubuntu.com/questions/1146175/desktop-icons-just-dropped-down-left-screen-into-never-never-land
+
+# DATE: May 25, 2019.
+
+# UPDT: No updates
+
+# NOTE: No notes
+
+# TODO: Don't allow sudo which might change icon file ownership
+#       Better handling of key in use.
+#       When monitor that used to hold icons is unplugged then do .... ???
+#       CLI option to set monitor for icons without using GUI
+#       Find images for Window Dialog icons
+#       Remove left over code lifted from eyesome not needed
+
+### Defaults ###
+MON_ICON_ROWS="9"
+MON_ICON_COLUMNS="18"
+ConfigFilename=~/.iconic
+ICONS_DIR="/home/$USER/Desktop"
+
+### Dependancies ###
+
+command -v yad >/dev/null 2>&1 || { echo >&2 \
+        "yad package required but it is not installed.  Aborting."; \
+        exit 1; }
+
+command -v wmctrl >/dev/null 2>&1 || { echo >&2 \
+        "wmctrl package required but it is not installed.  Aborting."; \
+        exit 2; }
+
+command -v xdotool >/dev/null 2>&1 || { echo >&2 \
+        "xdotool package required but it is not installed.  Aborting."; \
+        exit 3; }
+
+# Suppress Transient parent error spam
+exec 2> >(grep -v 'GtkDialog mapped without a transient parent' >&2)
+
+## Yad Window parameters
+GUI=false
+# Hard code Height & Width to suit your screen resolution and scaling factor
+TITLE="iconic"
+TEXT="Set Desktop Icon spacing and monitor"
+ICON="/usr/share/icons/Adwaita/48x48/devices/computer.png"
+
+GEOMETRY=("--width=700" "--height=500")
+# Pass Parameter 1 with ---geometry="WidxHgt+WidOff+HgtOff" to override
+[[ "$1" == --geometry=* ]] && { GEOMETRY=("$1"); GUI=true; }
+
+# Pass Parameter 2 with icon for window image
+[[ ! -z "$2" ]] && { ICON="$2"; GUI=true; }
+
+# echo "GEOMETRY: ${GEOMETRY[@]}"
+KEY="34455"     # Key for tying Notebook pages (tabs) together
+                # multi-timer is KEY="12345", don't duplicate
+                # eyesome-cfg.sh is KEY="23255", don't duplicate
+
+# Temporary files for Notebook output
+res1=$(mktemp --tmpdir iface1.XXXXXXXX) # Notebook General Page (Tab 1)
+res2=$(mktemp --tmpdir iface2.XXXXXXXX) # Notebook Monitor 1 Page (Tab 2)
+res3=$(mktemp --tmpdir iface3.XXXXXXXX) # Notebook Monitor 2 Page (Tab 3)
+res4=$(mktemp --tmpdir iface4.XXXXXXXX) # Notebook Monitor 3 Page (Tab 4)
+
+IconsRaw=$(mktemp --tmpdir icons1.XXXXXXXX)     # Unsorted icons
+IconsSort=$(mktemp --tmpdir icons2.XXXXXXXX)    # Icons sorted by screen pos
+IconsNew=$(mktemp --tmpdir icons3.XXXXXXXX)     # Icons sorted by user input
+
+OLD_IFS=$IFS
+IFS="|"
+
+declare -a CfgArr       # Configuration file array
+declare -a IconsArr     # icon names & positions array
+declare -a OldIconsArr  # Old positions for restoring desktop icons
+declare -a aXrandr      # Xrandr monitor details array
+
+# Configuration file indices
+CFG_ACTIVE_MONITOR_NDX=0
+CFG_LEFT_COL_NO_GO_NDX=1
+CFG_RIGHT_COL_NO_GO_NDX=2
+CFG_TOP_ROW_NO_GO_NDX=3
+CFG_BOTTOM_ROW_NO_GO_NDX=4
+CFG_TEST_SECONDS_NDX=5
+
+CFG_MAIN_USED_CNT=6
+CFG_MAIN_EMPTY_FIELDS=4     # 6 used and 4 for future use
+CFG_MON_FLD_CNT=20
+CFG_MONITOR_EMPTY_FIELDS=8  # Monitor 1, 2 & 3 = 12 used and 8 for future use
+
+CFG_MON1_NDX=10
+CFG_MON2_NDX=30
+CFG_MON3_NDX=50
+CFG_LAST_NDX=69
+
+### Error Message Functions ###
+
+Abend () {
+    # Abnormal Ending - Parameter 1 = message to display, Parameter 2=exit code
+
+    yad --image "dialog-error" --image-on-top --title "$TITLE - Fatal Error" \
+        "${GEOMETRY[@]}" --button=gtk-ok:0 --text "$1"
+    exit "$2"
+   
+} # Abend
+
+ErrMsg () {
+    # Parmater 1 = message to display
+
+    yad --image "dialog-error" --title "$TITLE - Logical Error" \
+        "${GEOMETRY[@]}" --button=gtk-ok:0 --text "$1"
+    fErrMsgForceContinue=true
+ 
+} # ErrMsg
+
+InfoMsg () {
+    # Parmater 1 = message to display
+
+    yad --image "dialog-information" --title "$TITLE - Logical Error" \
+        "${GEOMETRY[@]}" --button=gtk-ok:0 --text "$1"
+ 
+} # InfoMsg
+
+GetYesNo () {
+    # Parmater 1 = question to display 
+
+    local Retn
+    yad --image "gtk-dialog-question" --title "$TITLE - Confirmation" \
+        "${GEOMETRY[@]}" --button=gtk-yes:0 --button=gtk-no:1 --text "$1"
+
+    if [[ "$?" == 0 ]] ; then
+        fGetYesNo=true
+        return 0
+    else
+        fGetYesNo=false
+        return 1
+    fi
+
+} # GetYesNo
+
+GetMonitorWorkSpace () {
+
+    # Move configuration array monitor 1-3 to WorkSpace fields
+    # $1 = CfgArr Starting Index Number
+
+    local i    
+    i=$1
+    MonNumber="${CfgArr[$((i++))]}"          # "1: Name", "2: Name", "3: Name"
+    MonXrandrName="${CfgArr[$((i++))]}"      # "eDP-1-1" (primary) / "HDMI-0", etc
+    MonStatus="${CfgArr[$((i++))]}"          # "Enabled" / "Disabled"
+    MonType="${CfgArr[$((i++))]}"            # "Hardware" / "Software"
+    MonHardwareName="${CfgArr[$((i++))]}"    # "intel_backlight" / "xrandr"
+    MonWidth="${CfgArr[$((i++))]}"           # pixels wide
+    MonHeight="${CfgArr[$((i++))]}"          # pixels high
+    MonColOffset="${CfgArr[$((i++))]}"       # screen pixels to left of monitor
+    MonRowOffset="${CfgArr[$((i++))]}"       # screen pixels above monitor
+    MonName="${CfgArr[$((i++))]}"            # "Laptop Display" / '50" Sony TV'
+    MonIconRows="${CfgArr[$((i++))]}"        # count of icons veritcally spread
+    MonIconColumns="${CfgArr[$((i++))]}"     # count of icons horizontially
+    # 8 spare fields
+
+} # GetMonitorWorkSpace
+
+MON_NAME_NDX=9  # Frequent reference
+
+SetMonitorWorkSpace () {
+
+    # Move WorkSpace 1-3 into array for writing to disk
+    # $1 = CfgArr Starting Index Number
+    local i    
+    i=$1
+
+    CfgArr[$((i++))]="$MonNumber"          # "1: Name", "2: Name", "3: Name"
+    CfgArr[$((i++))]="$MonXrandrName"      # "eDP-1-1" (primary) / "HDMI-0", etc
+    CfgArr[$((i++))]="$MonStatus"          # "Enabled" / "Disabled"
+    CfgArr[$((i++))]="$MonType"            # "Hardware" / "Software"
+    CfgArr[$((i++))]="$MonHardwareName"    # "intel_backlight" / "xrandr"
+    CfgArr[$((i++))]="$MonWidth"           # pixels wide
+    CfgArr[$((i++))]="$MonHeight"          # pixels high
+    CfgArr[$((i++))]="$MonColOffset"         # screen pixels to left of monitor
+    CfgArr[$((i++))]="$MonRowOffset"         # screen pixels above monitor
+    CfgArr[$((i++))]="$MonName"            # "Laptop Display" / '50" Sony TV'
+    CfgArr[$((i++))]="$MonIconRows"        # count of icons veritcally spread
+    CfgArr[$((i++))]="$MonIconColumns"     # count of icons horizontially
+    # 8 spare fields
+
+} # SetMonitorWorkSpace
+
+InitXrandrArray () {
+
+    # Array is used for each monitor and searched by name.
+    # Saves time to search on connected/disconnected, primary monitor,
+    # X amd Y coordinates, brightness level, gamma level.
+
+    mapfile -t aXrandr < <(xrandr --verbose --current)
+    
+} # InitXrandrArray
+
+SearchXrandrArray () {
+
+    # Set $MonXrandrName = xrandr monitor name to search for.
+
+    fNameFnd=false
+    fBrightnessFnd=false
+    fGammaFnd=false
+    fCrtcFnd=false
+    XrandrConnection=disconnected
+    XrandrPrimary=false
+    XrandrTopLeftMonitor=false  # TODO: Use to find active monitor +0+0
+    XrandrGamma=""
+    XrandrBrightness=""
+    XrandrCRTC=""           # Laptop lid open value=0, lid closed=blank
+    XrandrWidth=0
+    XrandrHeight=0
+    XrandrColOffset=0
+    XrandrRowOffset=0
+
+    local i
+    for (( i=0; i<"${#aXrandr[*]}"; i++ )) ; do
+
+        line="${aXrandr[$i]}"
+        # Have we looped to next monitor and not found search string?
+        if [[ "$line" =~ " connected " ]] && [[ $fNameFnd == true ]] ; then
+            break
+        fi
+
+        if [[ "$line" =~ ^"$MonXrandrName connected" ]]; then
+            fNameFnd=true
+            XrandrConnection=connected
+            local grid size
+            if [[ "$line" =~ "primary" ]] ; then
+                XrandrPrimary=true # Override default
+                grid=$(cut -d' ' -f4 <<<"$line")
+            else
+                grid=$(cut -d' ' -f3 <<<"$line")
+            fi
+            # Signal Top Left ,pmotpr
+            [[ "$line" =~ "+0+0" ]] && XrandrTopLeftMonitor=true
+            # Extract WidthxHeight+Xoffset+Yoffset substrings            
+            size=$(cut -d'+' -f1 <<<"$grid")
+            XrandrWidth=$(cut -d'x' -f1 <<<"$size")
+            XrandrHeight=$(cut -d'x' -f2 <<<"$size")
+            XrandrColOffset=$(cut -d'+' -f2<<<"$grid")
+            XrandrRowOffset=$(cut -d'+' -f3 <<<"$grid")
+        fi
+
+        if [[ $fNameFnd == true ]] && [[ $fGammaFnd == false ]] ; then
+            if [[ "$line" =~ "Gamma: " ]]; then
+                fGammaFnd=true
+                XrandrGamma="${line##* }"
+            fi
+        fi
+
+        if [[ $fGammaFnd == true ]] && [[ $fBrightnessFnd == false ]] ; then
+            if [[ "$line" =~ "Brightness: " ]]; then
+                fBrightnessFnd=true
+                XrandrBrightness="${line##* }"
+            fi
+        fi
+
+        if [[ $fBrightnessFnd == true ]] && [[ $fCrtcFnd == false ]] ; then
+            if [[ "$line" =~ "CRTC: " ]]; then
+                fCrtcFnd=true
+                XrandrCRTC="${line##* }"
+                break
+            fi
+        fi
+        
+    done
+    
+} # SearchXrandrArray
+
+CreateConfiguration () {
+
+    # Initialize array to blanks because we have spare fields for future
+    local i
+    for ((i=0; i<=CFG_LAST_NDX; i++)); do
+        CfgArr[$i]=" "
+    done
+    InitXrandrArray         # Initialize for Xrandr searching
+    SearchXrandrArray
+
+    CfgArr[$CFG_ACTIVE_MONITOR_NDX]=1
+    CfgArr[$CFG_LEFT_COL_NO_GO_NDX]=54
+    CfgArr[$CFG_RIGHT_COL_NO_GO_NDX]=0
+    CfgArr[$CFG_TOP_ROW_NO_GO_NDX]=10
+    CfgArr[$CFG_BOTTOM_ROW_NO_GO_NDX]=0
+    CfgArr[$CFG_TEST_SECONDS_NDX]=10
+
+    backlight=$(ls /sys/class/backlight)
+    # If no hardware support use software, eg `xrandr`
+    MonStatus="Enabled"                 # opposite is "Disabled"
+    if [[ $backlight == "" ]]; then
+        # No /sys/class/backlight/* directory so software controlled (xrandr)
+        MonType="Software"
+        MonName="$PrimaryMonitor"     # "eDP-1-1" "LVDS1", etc.
+        backlight="xrandr"
+    else
+        MonType="Hardware"
+        MonName="Laptop Display"
+    fi
+
+    MonIconRows="$MON_ICON_ROWS"     # yad uses 6 decimal places
+    MonIconColumns="$MON_ICON_COLUMNS"
+
+    # Set Monitor 1 fields based on "primary" setting in xrandr
+    MonNumber=1
+    MonHardwareName="$backlight"
+    XrandrName=$(xrandr --current | grep primary)
+    PrimaryMonitor=${XrandrName%% *}
+    MonXrandrName="$PrimaryMonitor"     # "eDP-1-1" "LVDS1", etc.
+    SearchXrandrArray
+    MonWidth="$XrandrWidth"
+    MonHeight="$XrandrHeight"
+    MonColOffset="$XrandrColOffset"
+    MonRowOffset="$XrandrRowOffset"
+    SetMonitorWorkSpace $CFG_MON1_NDX   # Set Monitor #1
+
+    # Set Monitor 2 based on next non-primary and active monitor in xrandr    
+    MonNumber=2
+    MonType="Software"
+    MonHardwareName="xrandr"
+    XrandrName=$(xrandr --current | grep -v "$PrimaryMonitor" | \
+                grep " connected" )
+    Monitor2=${XrandrName%% *}
+    MonXrandrName="$Monitor2"
+    MonName="$Monitor2"
+    
+    # If Monitor2 blank no external TV / monitor attached
+    if [[ "$Monitor2" == "" ]]; then MonStatus="Disabled"
+                                else MonStatus="Enabled" ; fi
+    SearchXrandrArray
+    MonWidth="$XrandrWidth"
+    MonHeight="$XrandrHeight"
+    MonColOffset="$XrandrColOffset"
+    MonRowOffset="$XrandrRowOffset"
+    SetMonitorWorkSpace $CFG_MON2_NDX   # Set Monitor #2
+    
+    # Set Monitor 3 based on next monitor in xrandr that isn't Monitor 1 or 2.
+    MonNumber=3
+    XrandrName=$(xrandr --current | grep -v "$PrimaryMonitor" | \
+                grep -v "$Monitor2" | grep " connected" )
+    Monitor3=${XrandrName%% *}
+    MonXrandrName="$Monitor3"
+    MonName="$Monitor3"
+    
+    # If Monitor2 blank no external TV / monitor attached
+    if [[ "$Monitor3" == "" ]]; then MonStatus="Disabled"
+                                else MonStatus="Enabled" ; fi
+    SearchXrandrArray
+    MonWidth="$XrandrWidth"
+    MonHeight="$XrandrHeight"
+    MonColOffset="$XrandrColOffset"
+    MonRowOffset="$XrandrRowOffset"
+    SetMonitorWorkSpace $CFG_MON3_NDX   # Set Monitor #3
+
+} # CreateConfiguration
+
+ReadConfiguration () {
+
+    # Read hidden configuration file with entries separated by "|" into array
+    if [[ -s "$ConfigFilename" ]] ; then
+         IFS='|' read -ra CfgArr < "$ConfigFilename"
+    else
+        CreateConfiguration
+    fi
+    
+    local a b c Str
+    a="1:${CfgArr[(( CFG_MON1_NDX + MON_NAME_NDX ))]}"
+    b="2:${CfgArr[(( CFG_MON2_NDX + MON_NAME_NDX ))]}"
+    c="3:${CfgArr[(( CFG_MON3_NDX + MON_NAME_NDX ))]}"
+    cbActiveMonitor="$a!$b!$c"
+    Str="${CfgArr[CFG_ACTIVE_MONITOR_NDX]}"
+    cbActiveMonitor="${cbActiveMonitor/$Str/\^$Str}"
+    ActiveMonitorName="$Str"    # Appears on MainMenu ()
+
+    # cut yad's 6 decimal positions using "%.*"
+      LeftColNoGo="${CfgArr[CFG_LEFT_COL_NO_GO_NDX]%.*}"
+     RightColNoGo="${CfgArr[CFG_RIGHT_COL_NO_GO_NDX]%.*}"
+       TopRowNoGo="${CfgArr[CFG_TOP_ROW_NO_GO_NDX]%.*}"
+    BottomRowNoGo="${CfgArr[$CFG_BOTTOM_ROW_NO_GO_NDX]%.*}"
+      TestSeconds="${CfgArr[CFG_TEST_SECONDS_NDX]%.*}"
+
+    # Internal array of Xrandr all setings for faster searches
+    InitXrandrArray
+
+} # ReadConfiguration
+
+WriteConfiguration () {
+
+    # write hidden configuration file using array
+    echo "${CfgArr[*]}" > "$ConfigFilename"
+    sed -i 's/.000000//g' "$ConfigFilename" # yad uses 6 decimal positions
+    ReadConfiguration
+
+} # WriteConfiguration
+
+TestNumeric () {
+
+    IsNumber=true
+    re='^[0-9]+$'
+    if ! [[ "$1" =~ $re ]] ; then
+       IsNumber=false
+    fi
+    
+} # TestNumeric
+
+RenumberIconsArr () {
+
+    # Set the sort order number after reading/sorting ${IconsArr[@]}
+    ICON_SELECT_NDX=0
+    ICON_ORDER_NDX=1
+    ICON_NAME_NDX=2
+    ICON_LINKLESS_NDX=3
+    ICON_DATE_NDX=4
+    ICON_COL_NDX=5
+    ICON_ROW_NDX=6
+    ICON_FLD_CNT=7
+
+    local i j
+    j=1
+    for (( i=0; i<${#IconsArr[@]}; i=i+ICON_FLD_CNT )) ; do
+        IconsArr[(( i+ICON_SELECT_NDX ))]="FALSE"
+        IconsArr[(( i+ICON_ORDER_NDX ))]="$j"
+        (( j++ ))
+    done
+
+} # RenumberIconsArr
+
+SetColsAndRows () {
+
+# TODO: Did we get active monitor into workspace?
+
+    # Using active Monitor Number, recalculate X & Y for all icons.
+    local Ndx Offset SavedMonNumber i
+    SavedMonNumber="${CfgArr[CFG_ACTIVE_MONITOR_NDX]:0:1}"  # "1", "2" or "3"
+
+    Offset=$(( SavedMonNumber - 1 ))
+    Offset=$(( CFG_MON_FLD_CNT * Offset ))
+    Ndx=$(( CFG_MON1_NDX + Offset ))
+    GetMonitorWorkSpace $Ndx
+
+    local i c r ColSize ColPos RowSize RowPos
+    ColSize=$(( MonWidth - LeftColNoGo - RightColNoGo ))
+    ColSize=$(( ColSize / MonIconColumns ))
+    RowSize=$(( MonHeight - TopRowNoGo - BottomRowNoGo ))
+    RowSize=$(( RowSize / MonIconRows ))
+
+    i=0
+    ColPos=$(( MonColOffset + LeftColNoGo ))
+    for (( c=1; c<MonIconColumns; c++ ))
+    do
+        RowPos=$(( MonRowOffset + TopRowNoGo ))
+        for (( r=1; r<MonIconRows; r++ ))
+        do
+            [[ "$i" -ge "${#IconsArr[@]}" ]] && break
+            IconsArr[(( i+ICON_COL_NDX ))]="$ColPos"
+            IconsArr[(( i+ICON_ROW_NDX ))]="$RowPos"
+            RowPos=$(( RowPos + RowSize ))
+            i=$(( i+ICON_FLD_CNT ))
+        done
+        [[ "$i" -gt "${#IconsArr[@]}" ]] && break
+        ColPos=$(( ColPos + ColSize ))
+    done
+
+} # SetColsAndRows
+
+BuildIconsArr () {
+
+    # Read through ~/Desktop and get names, date modified and screen positions
+
+    local i File Date Position X Y
+
+    > "$IconsRaw"       # Erase work file (shouldn't exist anyway)
+
+    for File in "$ICONS_DIR"/*; do
+
+        Date=$(stat -c %y "$File")
+        Date="${Date%% *}"
+        Linkless="${File##*/}"
+        Linkless=${Linkless#"Link to "}
+        
+        Position=$(gvfs-info -a 'metadata::nautilus-icon-position' "$File")
+        Position="${Position##* }" # Remove noise up to " x,y" at end
+
+        X=$(cut -d',' -f1 <<< "$Position")
+        TestNumeric "$X"
+        [[ "$IsNumber" == false ]] && X="?"
+
+        Y=$(cut -d',' -f2 <<< "$Position")
+        TestNumeric "$Y"
+        [[ "$IsNumber" == false ]] && Y="?"
+
+        # X,Y screen coordinates invalid backup files ending with "~"
+        ! [[ "$X" == "?" || "$Y" == "?" ]] && { let i++; echo \
+            "FALSE|$i|${File##*/}|$Linkless|$Date|$X|$Y" >> "$IconsRaw"; }
+
+    done
+
+    # Sort Raw file by gnome's X then Y screen offset
+    sort "$IconsRaw" --key=6,6 --key=7,7 --output="$IconsSort" \
+        --field-separator="|" --numeric-sort
+    tr '\n' '|' < "$IconsSort" > "$IconsNew"
+    IFS='|' read -ra IconsArr < "$IconsNew"
+
+    RenumberIconsArr
+    OldIconsArr=("${IconsArr[@]}")
+
+} # BuildIconsArr
+
+Cleanup () {
+
+    # Remove temporary files
+    rm -f "$res1" "$res2" "$res3" "$res4"
+    rm -f "$IconsRaw" "$IconsSort" "$IconsNew"
+
+    IFS=$OLD_IFS;                       # Restore Input File Separator
+
+} # Cleanup
+
+BuildMonitorPage () {
+
+    # Move configuration array monitor 1-3 to Working Screen fields
+    # $1 = CfgArr Starting Index Number
+
+    aMonPage=()
+    local i
+    i="$1"
+    aMonPage+=("--field=Monitor Number::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Xrandr Name::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Monitor Status::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Monitor Type::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Internal Name::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Monitor Width (pixels)::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Monitor Height::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=X offset (from left)::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Y offset(from top)::RO")
+    aMonPage+=("${CfgArr[$((i++))]}")
+
+    aMonPage+=("--field=Monitor Name:")
+    aMonPage+=("${CfgArr[$((i++))]}")
+    aMonPage+=("--field=Monitor Icon Rows::NUM")
+    aMonPage+=("${CfgArr[$((i++))]}"!0.1..50!1!0)
+    aMonPage+=("--field=Monitor Icon Columns::NUM")
+    aMonPage+=("${CfgArr[$((i++))]}"!0.1..50!1!0)
+    # 9 spare fields
+
+} # BuildMonitorPage
+
+AddEmptyCfgFields () {
+
+    # Add empty fields to Configuration File
+    # Allows fields for future use without having to modify configuration file
+    # $1 = Number of fields to add
+
+    local i
+    for ((i=1; i<="$1"; i++)); do
+        printf " |" >> "$ConfigFilename"
+    done
+
+} # AddEmptyCfgFields
+
+SortIconsRaw () {
+
+    # $1 = Primary key, $2= optional second key
+    
+    sort "$IconsRaw" --key=6,6 --key=7,7 --output="$IconsSort" \
+        --field-separator="|" --numeric-sort
+
+    tr '\n' '|' < "$IconsSort" > "$IconsNew"
+    IFS='|' read -ra IconsArr < "$IconsNew"
+    RenumberIconsArr
+    SetColsAndRows
+
+}
+
+SortIconsArr () {
+
+    # Parm1 "Alpha", "Linkless", "Newest", "Oldest"
+    
+    # Convert IconsArr into IconsRaw for sorting purposes.
+    # Following doesn't work for first line, then works ???
+    # sed '-es/|/\n/'{99999..1..7} <<< "${IconsArr[*]}" > "$IconsRaw"
+
+    # Convert array into regular file sort can handle.
+    > "$IconsRaw" # erase old file
+    local i
+    for (( i=0; i<"${#IconsArr[@]}"; i++ )) ; do
+        # If last field append \n (new line) instead of "|"
+        if (( (i+1) % ICON_FLD_CNT == 0 )); then
+            echo "${IconsArr[i]}" >> "$IconsRaw"
+        else
+            printf "%s|" "${IconsArr[i]}" >> "$IconsRaw"
+        fi
+    done
+
+    if [[ "$1" == "Alpha" ]] ; then
+         # Get IconsSort doesn't exist error and not sorting properly with var
+       sort "$IconsRaw" --key=3 \
+            --output="$IconsSort" --field-separator="|"
+    elif [[ "$1" == "Linkless" ]] ; then
+        sort "$IconsRaw" --key=4 \
+            --output="$IconsSort" --field-separator="|"
+    elif [[ "$1" == "Oldest" ]] ; then
+       sort "$IconsRaw" --key=5 \
+            --output="$IconsSort" --field-separator="|"
+    elif [[ "$1" == "Newest" ]] ; then
+       sort "$IconsRaw" --key=5 \
+            --output="$IconsSort" --field-separator="|" -r
+    else
+        echo "SHOULD NOT BE HERE: SortIconsArr"
+    fi
+
+    tr '\n' '|' < "$IconsSort" > "$IconsNew"
+    IFS='|' read -ra IconsArr < "$IconsNew"
+    RenumberIconsArr
+    SetColsAndRows
+
+} # SortIconsArr
+
+MoveOneIcon () {
+
+    # One entry was selected to change it's position in list
+    local SourceArr TargetArr NewArr Selected INSTRUCTIONS
+
+    IFS='|' read -ra SourceArr <<< "$@" # Selected entry in parameter list
+    if [[ "${#SourceArr[@]}" -lt $ICON_FLD_CNT ]] ; then
+        ErrMsg "You must select an icon to move before pressing Enter"
+        return
+    fi
+    INSTRUCTIONS="Select Icon to move in front of and press Enter"
+
+    Selected=$(yad --list --radiolist --skip-taskbar \
+        --image=preferences-desktop-screensaver \
+        --window-icon=preferences-desktop-screensaver \
+        --separator="|" \
+        --margins=10 --no-click \
+        --title="$TITLE" "${GEOMETRY[@]}" \
+        --text="<big><b>$TEXT</b></big> - $INSTRUCTIONS" \
+        --column "Select" \
+        --column "Order:HD" \
+        --column "Icon name" \
+        --column "Linkless name:HD" \
+        --column "Modified:HD" \
+        --column "X Pos:HD" \
+        --column "Y Pos:HD" \
+        --button="_Cancel:$ButnCancel" \
+        --button="_Apply:$ButnApply" \
+        "${IconsArr[@]}")
+
+    Retn="$?"
+
+    if [[ $Retn == "$ButnCancel" ]] ||  [[ $Retn == 252 ]] ; then
+        return   # 252 = Escape pressed
+    fi
+
+    IFS='|' read -ra TargetArr <<< "${Selected[@]}" # Move before target
+    if [[ "${#TargetArr[@]}" -lt "$ICON_FLD_CNT" ]] ; then
+        ErrMsg "Select target icon to move in front of before pressing Enter"
+        return
+    fi
+
+    if [[ "${SourceArr[ICON_ORDER_NDX]}" == "${TargetArr[ICON_ORDER_NDX]}" ]]
+    then
+        ErrMsg "Target icon to move in front of cannot be same as source icon."
+        return
+    fi
+
+    # Copy original array to new array omitting source array up to target
+    # array. Then copy in source array. Then continue copying all except
+    # source array.
+    local i j NewArr SourceOrder TargetOrder
+    NewArr=()
+    SourceOrder="${SourceArr[ICON_ORDER_NDX]}"
+    TargetOrder="${TargetArr[ICON_ORDER_NDX]}"
+
+    for (( i=0; i<${#IconsArr[@]}; i=i+ICON_FLD_CNT )) ; do
+        if [[ "${IconsArr[i+ICON_ORDER_NDX]}" == "$SourceOrder" ]] ; then
+            continue
+        fi
+        if [[ "${IconsArr[i+ICON_ORDER_NDX]}" == "$TargetOrder" ]] ; then
+            for (( j=0; j<ICON_FLD_CNT; j++ )) ; do
+                NewArr+=("${SourceArr[j]}")
+            done
+        fi
+        for (( j=0; j<ICON_FLD_CNT; j++ )) ; do
+            NewArr+=("${IconsArr[i+j]}")
+        done
+    done
+    
+    IconsArr=("${NewArr[@]}")
+
+    RenumberIconsArr
+    SetColsAndRows
+    
+} # MoveOneIcon
+
+SortIconsList () {
+    
+    local HoldIcons
+    HoldIcons=("${IconsArr[@]}")
+
+    while true ; do
+        local Selected INSTRUCTIONS
+        INSTRUCTIONS="Click Icon to move and press Enter"
+        Selected=$(yad --list --radiolist --skip-taskbar \
+        --image=preferences-desktop-screensaver \
+        --window-icon=preferences-desktop-screensaver \
+        --margins=10 --no-click \
+        --title="$TITLE" "${GEOMETRY[@]}" \
+        --text="<big><b>$TEXT</b></big> - $INSTRUCTIONS" \
+        --column "Select" \
+        --column "Order" \
+        --column "Icon name" \
+        --column "Linkless name:HD" \
+        --column "Modified date" \
+        --column "Col Pos:NUM" \
+        --column "Row Pos:NUM" \
+        --button="_Alpha Sort:$ButnAlpha" \
+        --button="_Linkless Sort:$ButnLinkless" \
+        --button="_Oldest Date:$ButnOldest" \
+        --button="_Newest Date:$ButnNewest" \
+        --button="_Test:$ButnTest"  \
+        --button="_Apply:$ButnApply" \
+        --button="_Cancel:$ButnCancel" \
+        "${IconsArr[@]}")
+
+        Retn="$?"
+
+        if [[ $Retn == "$ButnAlpha" ]] ; then
+            SortIconsArr "Alpha"
+            continue
+        elif [[ $Retn == "$ButnLinkless" ]] ; then
+            SortIconsArr "Linkless"
+            continue
+        elif [[ $Retn == "$ButnOldest" ]] ; then
+            SortIconsArr "Oldest"
+            continue
+        elif [[ $Retn == "$ButnNewest" ]] ; then
+            SortIconsArr "Newest"
+            continue
+        elif [[ $Retn == "$ButnTest" ]] ; then
+            TestIcons Test
+            continue
+        elif [[ $Retn == "$ButnApply" ]] ; then
+            GetYesNo "Are you sure you want to arrange Icons on desktop?"
+            [[ "$fGetYesNo" == false ]] && continue
+            OldIconsArr=("${IconsArr[@]}")
+            TestIcons Reset
+            break
+        elif [[ $Retn == "$ButnCancel" ]] || [[ $Retn == 252 ]] ; then
+            # TODO: Exit without saving 99 changes are you sure?
+            # GetYesNo "Exit without saving Icon Sorting changes are you sure?"
+            # [[ "$fGetYesNo" == false ]] && continue
+            IconsArr=("${HoldIcons[@]}")
+            break
+        fi
+        
+        MoveOneIcon "${Selected[@]}"
+    done
+    
+} # SortIconsList
+
+GetMonitorTabs () {
+
+    local Retn i NewArr
+
+    yad --plug=$KEY --tabnum=1 --form \
+        --field="Monitor for Desktop Icons:CB" \
+                "$cbActiveMonitor" \
+        --field="X Pos Left side reserved pixels:NUM" \
+                "${CfgArr[CFG_LEFT_COL_NO_GO_NDX]}"!0.0..100!1!0 \
+        --field="X Pos Right side reserved pixels:NUM" \
+                "${CfgArr[CFG_RIGHT_COL_NO_GO_NDX]}"!0.0..100!1!0 \
+        --field="Y Pos Top area reserved pixels:NUM" \
+                "${CfgArr[CFG_TOP_ROW_NO_GO_NDX]}"!0.0..100!1!0 \
+        --field="Y Pos Bottom area reserved pixels:NUM" \
+                "${CfgArr[CFG_BOTTOM_ROW_NO_GO_NDX]}"!0.0..100!1!0 \
+        --field="Number of seconds to run test view:NUM" \
+                "${CfgArr[CFG_TEST_SECONDS_NDX]}"!0.0..100!1!0 \
+        > "$res1" &
+
+    # Monitor 1 notebook page
+    BuildMonitorPage "$CFG_MON1_NDX"
+    yad --plug=$KEY --tabnum=2 --form \
+        "${aMonPage[@]}" > "$res2" &
+
+    # Monitor 2 notebook page
+    BuildMonitorPage "$CFG_MON2_NDX"
+    yad --plug=$KEY --tabnum=3 --form \
+        "${aMonPage[@]}" > "$res3" &
+
+    # Monitor 3 notebook page
+    BuildMonitorPage "$CFG_MON3_NDX"
+    yad --plug=$KEY --tabnum=4 --form \
+        "${aMonPage[@]}" > "$res4" &
+
+    # run main dialog TODO: Need Cancel / Apply / Test buttons
+    yad --notebook --key=$KEY --tab="General" --tab="Monitor 1" \
+        --tab="Monitor 2" --tab="Monitor 3" --active-tab="Desktop Icons" \
+        --image=sleep --image-on-top \
+        --title="$TITLE" "${GEOMETRY[@]}" \
+        --text="<big><b>$TEXT</b></big> - Edit Configuration" \
+        --button="_Test:$ButnTest"  \
+        --button="_Apply:$ButnApply" \
+        --button="_Cancel:$ButnCancel"
+
+    Retn="$?"
+
+    IFS='|' read -ra NewArr < "$res1"
+
+    for (( i=0; i<CFG_MAIN_USED_CNT; i++ )) ; do
+        if [[ $i == 0 ]] ; then
+            CfgArr[0]="${NewArr[i]}"    # Monitor choice box
+            printf "%s" "${CfgArr[i]}|" >  "$ConfigFilename"
+        else
+            CfgArr[i]="${NewArr[i]%.*}"
+            printf "%s" "${CfgArr[i]}|" >> "$ConfigFilename"
+        fi
+    done
+
+    # TODO: Says 4 empty fields but we always have 3 in array???
+    AddEmptyCfgFields "$CFG_MAIN_EMPTY_FIELDS" # Extra fields for future use
+
+    truncate -s -1 "$res2"  # Remove new line at EOF
+    cat "$res2" >>  "$ConfigFilename"
+    AddEmptyCfgFields "$CFG_MONITOR_EMPTY_FIELDS" # Extra fields for future use
+    truncate -s -1 "$res3"  # Remove new line at EOF
+    cat "$res3" >>  "$ConfigFilename"
+    AddEmptyCfgFields "$CFG_MONITOR_EMPTY_FIELDS"
+    truncate -s -1 "$res4"
+    cat "$res4" >> "$ConfigFilename"
+    AddEmptyCfgFields "$CFG_MONITOR_EMPTY_FIELDS"
+    echo ""     >> "$ConfigFilename" # Append new line character at EOF
+
+    sed -i 's/.000000//g' "$ConfigFilename" # yad uses 6 decimal positions
+
+    ReadConfiguration # Reseting monitor to #1 second time
+    SetColsAndRows
+
+    return "$Retn"
+
+} # GetMonitorTabs
+
+MonitorsNotebook () {
+
+    local Retn HoldIcons HoldCfg
+    HoldIcons=("${IconsArr[@]}")
+    HoldCfg=("${CfgArr[@]}")
+
+    while true ; do
+
+        # Desktop Icons notebook page
+        GetMonitorTabs
+        Retn="$?"
+
+        if  [[ $Retn == "$ButnTest" ]] ; then
+            TestIcons Test # TODO: After test monitor resets from 3 to 1
+            continue
+
+        elif [[ $Retn == "$ButnApply" ]] ; then
+            GetYesNo "Are you sure you want to arrange Icons on desktop?"
+            [[ "$fGetYesNo" == false ]] && continue
+            OldIconsArr=("${IconsArr[@]}")
+            TestIcons Reset
+            break
+
+        elif [[ $Retn == "$ButnCancel" ]] || [[ $Retn == 252 ]] ; then
+            # TODO: Exit without saving 99 changes are you sure?
+            # GetYesNo "Exit without saving Icon Sorting changes are you sure?"
+            # [[ "$fGetYesNo" == false ]] && continue
+            CfgArr=("${HoldCfg[@]}")
+            WriteConfiguration
+            ReadConfiguration
+            IconsArr=("${HoldIcons[@]}")
+            return
+        fi
+
+    done
+
+
+} # MonitorsNotebook
+
+TestIcons () {
+
+
+    [[ $TestSeconds == "" ]] || [[ $TestSeconds == 0 ]] && TestSeconds=5
+
+    local i Position File
+    for (( i=0; i<${#IconsArr[@]}; i=i+ICON_FLD_CNT )) ; do
+        File="$ICONS_DIR"/"${IconsArr[((i+ICON_NAME_NDX))]}"
+        Position="${IconsArr[((i+ICON_COL_NDX))]},${IconsArr[((i+ICON_ROW_NDX))]}"
+        gvfs-set-attribute -t string "$File" \
+                'metadata::nautilus-icon-position' "$Position"
+    done
+
+    if [[ "$1" == "Reset" ]] ; then
+        wmctrl -k on        # Show desktop
+        sleep .1            # Extra time for show desktop, sometimes fails
+        xdotool key F5      # Refresh desktop (show icon new positions)
+        wmctrl -k off       # Restore windows
+        return
+    fi
+
+    # Proceed with test
+    wmctrl -k on        # Show desktop
+    sleep .1            # Extra time for show desktop, sometimes fails
+    xdotool key F5      # Refresh desktop (show icon new positions)
+    sleep $TestSeconds  # Pause for view
+    wmctrl -k off       # Restore windows
+
+    for (( i=0; i<${#OldIconsArr[@]}; i=i+ICON_FLD_CNT )) ; do
+        File="$ICONS_DIR"/"${OldIconsArr[((i+ICON_NAME_NDX))]}"
+        Position="${OldIconsArr[((i+ICON_COL_NDX))]},${OldIconsArr[((i+ICON_ROW_NDX))]}"
+        gvfs-set-attribute -t string "$File" \
+                'metadata::nautilus-icon-position' "$Position"
+
+    done
+
+    wmctrl -k on        # Show desktop
+    sleep .1            # Extra time for show desktop, sometimes fails
+    xdotool key F5      # Refresh desktop (show icon new positions)
+    wmctrl -k off       # Restore windows
+
+} # TestIcons
+
+SaveIcons () {
+
+    local Selection Retn
+    Selection=$(yad --file --directory --save --skip-taskbar \
+        --image=preferences-desktop-screensaver \
+        --window-icon=preferences-desktop-screensaver \
+        --title="$TITLE" "${GEOMETRY[@]}" \
+        --button="_Save:$ButnSave" \
+        --button="_Cancel:$ButnCancel" \
+        --text="<big><b>$TEXT</b></big> - Save filename")
+    Retn="$?"
+
+    if [[ $Retn == "$ButnCancel" ]] || [[ $Retn == 252 ]] ; then
+        return   # Escape pressed
+    fi
+
+    if [[ -e "$Selection" ]] ; then
+        ErrMsg "File $Selection already exists. Aborting."
+        return
+    fi
+
+    # Can we write to file?
+    if ! >> "$Selection" ; then
+#    if ! [[ -w "$Selection" ]] ; then
+        ErrMsg "Permission denied creating $Selection. Aborting."
+        return
+    fi
+
+    cp -a "$IconsRaw" "$Selection" # Raw unsorted Icons in directory order
+
+} # SaveIcons
+
+LoadIcons () {
+
+    local Selection Retn HoldIcons FldCnt i
+
+    Selection=$(yad --file --directory --save --skip-taskbar \
+        --image=preferences-desktop-screensaver \
+        --window-icon=preferences-desktop-screensaver \
+        --title="$TITLE" "${GEOMETRY[@]}" \
+        --button="_Load:$ButnLoad" \
+        --button="_Cancel:$ButnCancel" \
+        --text="<big><b>$TEXT</b></big> - Save filename")
+    Retn="$?"
+
+    if [[ $Retn == "$ButnCancel" ]] || [[ $Retn == 252 ]] ; then
+        return   # Escape pressed
+    fi
+
+    if ! [[ -f "$Selection" ]] ; then
+        ErrMsg "File: $Selection does not exist."
+        return
+    fi
+        
+    # Sanity checks for right type of save file loaded
+    sort "$Selection" --key=6,6 --key=7,7 --output="$IconsSort" \
+        --field-separator="|" --numeric-sort
+    tr '\n' '|' < "$IconsSort" > "$IconsNew"
+    HoldIcons=("${IconsArr[@]}")
+    IFS='|' read -ra IconsArr < "$IconsNew"
+
+
+    FldCnt="${#IconsArr[@]}"
+    if [[ "$FldCnt" -lt "$ICON_FLD_CNT" ]] || (( FldCnt % ICON_FLD_CNT != 0 ))
+    then
+        IconsArr=("${HoldIcons[@]}")
+        ErrMsg "$Selection has invalid number of fields."
+        return
+    fi
+
+    for (( i=0; i<FldCnt; i=i+ICON_FLD_CNT )) ; do
+        if [[ "${IconsArr[i]}" == "FALSE" ]] ; then
+            TestNumeric "${IconsArr[i+ICON_COL_NDX]}"
+            if [[ "$IsNumber" == true ]] ; then
+                TestNumeric "${IconsArr[i+ICON_ROW_NDX]}"
+                if [[ "$IsNumber" == true ]] ; then
+                    continue ;
+                fi
+            fi
+        fi
+        IconsArr=("${HoldIcons[@]}")
+        ErrMsg "$Selection is not a valid Icon save file."
+        return
+    done
+
+    RenumberIconsArr
+    OldIconsArr=("${IconsArr[@]}")
+    cp -a "$Selection" "$IconsRaw" # Raw unsorted Icons in directory order
+
+    InfoMsg "$Selection has been loaded but not applied yet."
+
+} # LoadIcons
+
+MainMenu () {
+
+    ReadConfiguration
+
+    # Getting dozens of Green Beakers (yad icons) in taskbar when left running
+    # and auto updating every 15 seconds. Use --skip-taskbar
+    #   --timeout="$SecondsToUpdate" --timeout-indicator=top \
+    yad --form --skip-taskbar \
+        --image=preferences-desktop-screensaver \
+        --window-icon=preferences-desktop-screensaver \
+        --margins=10 \
+        --title="$TITLE" "${GEOMETRY[@]}" \
+        --text="<big><b>$TEXT</b></big> - Introduction" \
+        --field="Monitor for Desktop Icons:RO" \
+                "$ActiveMonitorName" \
+        --field="
+Click the <b><i>Save Icons</i></b> button below to save current icons setup.
+
+Click the <b><i>Load Icons</i></b> button below to reload previously saved icon setups.
+
+Click the <b><i>Icon Sort</i></b> button below to change Icon sort order. In a new window
+you will have these buttons and features:
+
+  - <b><i>Alpha Sort</i></b> button to sort icons alphabetically.
+  - <b><i>Linkless Sort</i></b> button to sort icons with 'Link to' name prefix
+    ignored. For example the icon name 'Link to bash-script-1.sh' becomes 
+    'bash-script-1.sh' for sorting purposes.
+  - <b><i>Oldest Date</i></b> button to sort icons with oldest at top.
+  - <b><i>Newest Date</i></b> button to sort icons with newset at top.
+  - After sorting, you can still select individual icons and reposition them.
+  - <b><i>Test</i></b> button for a $TestSeconds second view of what icons would look like if changes
+    were permanently applied.
+
+Click the <b><i>Monitors</i></b> button below to change Monitor setup. The General
+settings tab picks which monitor displays Desktop Icons. This tab also sets
+number of seconds for Icon test. You can define the reserved space at screen
+left, top, right and bottom edges. Separate tabs are provided for each 
+monitor (up to three supported). The monitor tab defines the number of
+rows and columns for icons. You can give each monitor a user friendly name.
+
+Click the <b><i>Apply</i></b> button to save configuration and apply changes to desktop.
+
+Click the <b><i>Quit</i></b> button below or press <b><i>Escape</i></b> to abandon changes.
+:LBL" \
+        --button="_Save Icons:$ButnSaveIcons" \
+        --button="_Load Icons:$ButnLoadIcons" \
+        --button="_Icon Sort:$ButnSort" \
+        --button="_Monitors:$ButnMonitors" \
+        --button="_Apply:$ButnApply" \
+        --button="_Quit:$ButnQuit" > /dev/null
+
+    Retn="$?"
+    
+} # MainMenu
+
+###################################
+#            MAINLINE             #
+###################################
+
+Main () {
+
+    ReadConfiguration   # Read ~/.iconic from disk into array $CfgArr
+    BuildIconsArr       # Read ~/Desktop to get icons into array $IconsArr
+
+    ButnAlpha=10
+    ButnLinkless=20
+    ButnOldest=30
+    ButnNewest=40
+    ButnTest=50
+    ButnSaveIcons=52
+    ButnLoadIcons=54
+    ButnSort=60
+    ButnMonitors=80     # 70 is for timeout
+    ButnApply=90
+    ButnQuit=100
+    ButnCancel=110
+    ButnSave=120
+    ButnLoad=130
+
+    while true ; do
+
+        MainMenu
+        
+        if [[ $Retn == "$ButnSaveIcons" ]] ; then
+            SaveIcons
+            continue
+        elif [[ $Retn == "$ButnLoadIcons" ]] ; then
+            LoadIcons
+            continue
+        elif [[ $Retn == "$ButnSort" ]] ; then
+            SortIconsList
+            continue
+        elif [[ $Retn == "$ButnMonitors" ]] ; then
+            MonitorsNotebook
+            continue
+        elif [[ $Retn == "$ButnApply" ]] ; then
+            GetYesNo "Are you sure you want to arrange Icons on desktop?"
+            [[ "$fGetYesNo" == false ]] && continue
+            OldIconsArr=("${IconsArr[@]}")
+            TestIcons Reset
+            WriteConfiguration  #TODO: Is this necessary here?
+            break
+        elif [[ $Retn == "$ButnQuit" ]] ; then
+        # TODO: Don't we need to rewrite configuration with original values?
+        #       But had they gone into Monitors notebook changes maybe saved!
+            break
+        elif [[ $Retn == 252 ]] ; then
+            break   # Escape pressed
+        fi
+echo "SHOULD NOT BE HERE: MAIN"
+
+    done
+
+    # Escape or Quit from yad notebook
+    Cleanup
+    exit 0
+
+} # Main
+
+Main "$@"
