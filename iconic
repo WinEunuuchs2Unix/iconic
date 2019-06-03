@@ -10,7 +10,7 @@
 
 # DATE: May 25, 2019.
 
-# UPDT: No updates
+# UPDT: 2019-06-02 Last row was appearing in next column top row.
 
 # NOTE: No notes
 
@@ -454,10 +454,10 @@ SetColsAndRows () {
 
     i=0
     ColPos=$(( MonColOffset + LeftColNoGo ))
-    for (( c=1; c<MonIconColumns; c++ ))
+    for (( c=1; c<=MonIconColumns; c++ ))
     do
         RowPos=$(( MonRowOffset + TopRowNoGo ))
-        for (( r=1; r<MonIconRows; r++ ))
+        for (( r=1; r<=MonIconRows; r++ ))
         do
             [[ "$i" -ge "${#IconsArr[@]}" ]] && break
             IconsArr[(( i+ICON_COL_NDX ))]="$ColPos"
