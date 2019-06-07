@@ -11,15 +11,29 @@
 # DATE: May 25, 2019.
 
 # UPDT: 2019-06-02 Last row was appearing in next column top row.
+#       2019-06-04 Apply button-remove "Are you sure..." message.
+#       2019-06-06 Add support for window icon in parameter 2.
+#                  Sort directories first
 
-# NOTE: No notes
+# NOTE: You can setup "~/Desktop/iconic.desktop" with +x bit set like so:
+
+#       [Desktop Entry]
+#       Name=iconic
+#       GenericName=iconic
+#       Comment=Desktop icon manager for multiple monitors
+#       Exec=iconic --geometry=800x600+4500+150 desktop
+#       Icon=desktop
+#       Terminal=false
+#       Type=Application
+#       Categories=Utility;
+
+#       Where +4500+150 is multiple monitor offset. Most use +0+0 instead.
+#       Where "desktop" = icon. Another option could be "computer", etc.
 
 # TODO: Don't allow sudo which might change icon file ownership
 #       Better handling of key in use.
 #       When monitor that used to hold icons is unplugged then do .... ???
 #       CLI option to set monitor for icons without using GUI
-#       Find images for Window Dialog icons
-#       Remove left over code lifted from eyesome not needed
 
 ### Defaults ###
 MON_ICON_ROWS="9"
@@ -49,7 +63,7 @@ GUI=false
 # Hard code Height & Width to suit your screen resolution and scaling factor
 TITLE="iconic"
 TEXT="Set Desktop Icon spacing and monitor"
-ICON="/usr/share/icons/Adwaita/48x48/devices/computer.png"
+ICON="desktop"
 
 GEOMETRY=("--width=700" "--height=500")
 # Pass Parameter 1 with ---geometry="WidxHgt+WidOff+HgtOff" to override
@@ -416,12 +430,13 @@ RenumberIconsArr () {
     # Set the sort order number after reading/sorting ${IconsArr[@]}
     ICON_SELECT_NDX=0
     ICON_ORDER_NDX=1
-    ICON_NAME_NDX=2
-    ICON_LINKLESS_NDX=3
-    ICON_DATE_NDX=4
-    ICON_COL_NDX=5
-    ICON_ROW_NDX=6
-    ICON_FLD_CNT=7
+    ICON_TYPE_NDX=2
+    ICON_NAME_NDX=3
+    ICON_LINKLESS_NDX=4
+    ICON_DATE_NDX=5
+    ICON_COL_NDX=6
+    ICON_ROW_NDX=7
+    ICON_FLD_CNT=8
 
     local i j
     j=1
@@ -475,11 +490,17 @@ BuildIconsArr () {
 
     # Read through ~/Desktop and get names, date modified and screen positions
 
-    local i File Date Position X Y
+    local i File Type Date Position X Y
 
     > "$IconsRaw"       # Erase work file (shouldn't exist anyway)
 
     for File in "$ICONS_DIR"/*; do
+
+        if [[ -L "$File" && -d "$File" ]] ; then
+            Type="Directory"    # Directories sorted before files
+        else
+            Type="File"
+        fi
 
         Date=$(stat -c %y "$File")
         Date="${Date%% *}"
@@ -499,12 +520,12 @@ BuildIconsArr () {
 
         # X,Y screen coordinates invalid backup files ending with "~"
         ! [[ "$X" == "?" || "$Y" == "?" ]] && { let i++; echo \
-            "FALSE|$i|${File##*/}|$Linkless|$Date|$X|$Y" >> "$IconsRaw"; }
+            "FALSE|$i|$Type|${File##*/}|$Linkless|$Date|$X|$Y" >> "$IconsRaw"; }
 
     done
 
     # Sort Raw file by gnome's X then Y screen offset
-    sort "$IconsRaw" --key=6,6 --key=7,7 --output="$IconsSort" \
+    sort "$IconsRaw" --key=7,7 --key=8,8 --output="$IconsSort" \
         --field-separator="|" --numeric-sort
     tr '\n' '|' < "$IconsSort" > "$IconsNew"
     IFS='|' read -ra IconsArr < "$IconsNew"
@@ -578,7 +599,7 @@ SortIconsRaw () {
 
     # $1 = Primary key, $2= optional second key
     
-    sort "$IconsRaw" --key=6,6 --key=7,7 --output="$IconsSort" \
+    sort "$IconsRaw" --key=7,7 --key=8,8 --output="$IconsSort" \
         --field-separator="|" --numeric-sort
 
     tr '\n' '|' < "$IconsSort" > "$IconsNew"
@@ -610,19 +631,17 @@ SortIconsArr () {
 
     if [[ "$1" == "Alpha" ]] ; then
          # Get IconsSort doesn't exist error and not sorting properly with var
-       sort "$IconsRaw" --key=3 \
+       sort "$IconsRaw" --key=3,3 --key=4,4 \
             --output="$IconsSort" --field-separator="|"
     elif [[ "$1" == "Linkless" ]] ; then
-        sort "$IconsRaw" --key=4 \
+        sort "$IconsRaw" --key=3,3 --key=5,5 \
             --output="$IconsSort" --field-separator="|"
     elif [[ "$1" == "Oldest" ]] ; then
-       sort "$IconsRaw" --key=5 \
+       sort "$IconsRaw" --key=3,3 --key=6,6 \
             --output="$IconsSort" --field-separator="|"
     elif [[ "$1" == "Newest" ]] ; then
-       sort "$IconsRaw" --key=5 \
+       sort "$IconsRaw" --key=3,3 --key=6,6 \
             --output="$IconsSort" --field-separator="|" -r
-    else
-        echo "SHOULD NOT BE HERE: SortIconsArr"
     fi
 
     tr '\n' '|' < "$IconsSort" > "$IconsNew"
@@ -644,15 +663,15 @@ MoveOneIcon () {
     fi
     INSTRUCTIONS="Select Icon to move in front of and press Enter"
 
-    Selected=$(yad --list --radiolist --skip-taskbar \
-        --image=preferences-desktop-screensaver \
-        --window-icon=preferences-desktop-screensaver \
+    Selected=$(yad --list --radiolist \
+        --image="$ICON" --window-icon="$ICON" \
         --separator="|" \
         --margins=10 --no-click \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - $INSTRUCTIONS" \
         --column "Select" \
         --column "Order:HD" \
+        --column "Icon type:HD" \
         --column "Icon name" \
         --column "Linkless name:HD" \
         --column "Modified:HD" \
@@ -717,14 +736,14 @@ SortIconsList () {
     while true ; do
         local Selected INSTRUCTIONS
         INSTRUCTIONS="Click Icon to move and press Enter"
-        Selected=$(yad --list --radiolist --skip-taskbar \
-        --image=preferences-desktop-screensaver \
-        --window-icon=preferences-desktop-screensaver \
+        Selected=$(yad --list --radiolist \
+        --image="$ICON" --window-icon="$ICON" \
         --margins=10 --no-click \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - $INSTRUCTIONS" \
         --column "Select" \
         --column "Order" \
+        --column "Icon Type:HD" \
         --column "Icon name" \
         --column "Linkless name:HD" \
         --column "Modified date" \
@@ -757,8 +776,8 @@ SortIconsList () {
             TestIcons Test
             continue
         elif [[ $Retn == "$ButnApply" ]] ; then
-            GetYesNo "Are you sure you want to arrange Icons on desktop?"
-            [[ "$fGetYesNo" == false ]] && continue
+            # GetYesNo "Are you sure you want to arrange Icons on desktop?"
+            # [[ "$fGetYesNo" == false ]] && continue
             OldIconsArr=("${IconsArr[@]}")
             TestIcons Reset
             break
@@ -812,7 +831,7 @@ GetMonitorTabs () {
     # run main dialog TODO: Need Cancel / Apply / Test buttons
     yad --notebook --key=$KEY --tab="General" --tab="Monitor 1" \
         --tab="Monitor 2" --tab="Monitor 3" --active-tab="Desktop Icons" \
-        --image=sleep --image-on-top \
+        --image="$ICON" --image-on-top \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - Edit Configuration" \
         --button="_Test:$ButnTest"  \
@@ -873,8 +892,8 @@ MonitorsNotebook () {
             continue
 
         elif [[ $Retn == "$ButnApply" ]] ; then
-            GetYesNo "Are you sure you want to arrange Icons on desktop?"
-            [[ "$fGetYesNo" == false ]] && continue
+            # GetYesNo "Are you sure you want to arrange Icons on desktop?"
+            # [[ "$fGetYesNo" == false ]] && continue
             OldIconsArr=("${IconsArr[@]}")
             TestIcons Reset
             break
@@ -941,9 +960,8 @@ TestIcons () {
 SaveIcons () {
 
     local Selection Retn
-    Selection=$(yad --file --directory --save --skip-taskbar \
-        --image=preferences-desktop-screensaver \
-        --window-icon=preferences-desktop-screensaver \
+    Selection=$(yad --file --directory --save \
+        --image="$ICON" --window-icon="$ICON" \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --button="_Save:$ButnSave" \
         --button="_Cancel:$ButnCancel" \
@@ -974,9 +992,8 @@ LoadIcons () {
 
     local Selection Retn HoldIcons FldCnt i
 
-    Selection=$(yad --file --directory --save --skip-taskbar \
-        --image=preferences-desktop-screensaver \
-        --window-icon=preferences-desktop-screensaver \
+    Selection=$(yad --file --directory --save \
+        --image="$ICON" --window-icon="$ICON" \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --button="_Load:$ButnLoad" \
         --button="_Cancel:$ButnCancel" \
@@ -1038,9 +1055,8 @@ MainMenu () {
     # Getting dozens of Green Beakers (yad icons) in taskbar when left running
     # and auto updating every 15 seconds. Use --skip-taskbar
     #   --timeout="$SecondsToUpdate" --timeout-indicator=top \
-    yad --form --skip-taskbar \
-        --image=preferences-desktop-screensaver \
-        --window-icon=preferences-desktop-screensaver \
+    yad --form \
+        --image="$ICON" --window-icon="$ICON" \
         --margins=10 \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - Introduction" \
@@ -1127,12 +1143,12 @@ Main () {
             MonitorsNotebook
             continue
         elif [[ $Retn == "$ButnApply" ]] ; then
-            GetYesNo "Are you sure you want to arrange Icons on desktop?"
-            [[ "$fGetYesNo" == false ]] && continue
+            # GetYesNo "Are you sure you want to arrange Icons on desktop?"
+            # [[ "$fGetYesNo" == false ]] && continue
             OldIconsArr=("${IconsArr[@]}")
             TestIcons Reset
             WriteConfiguration  #TODO: Is this necessary here?
-            break
+            continue
         elif [[ $Retn == "$ButnQuit" ]] ; then
         # TODO: Don't we need to rewrite configuration with original values?
         #       But had they gone into Monitors notebook changes maybe saved!
@@ -1140,7 +1156,6 @@ Main () {
         elif [[ $Retn == 252 ]] ; then
             break   # Escape pressed
         fi
-echo "SHOULD NOT BE HERE: MAIN"
 
     done
 
