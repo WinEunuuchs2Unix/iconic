@@ -1,7 +1,38 @@
 # iconic
-Place desktop icons evenly to any monitor
+## Place desktop icons evenly to any monitor
 
-This project was started when a new 4K monitor on the right caused icons on 2K monitor on the left to be placed down left column and then disappear. To fix this problem it was necessary to place icons based on monitor and not virtual screen dimensions. In the process I added a feature to place icons on any monitor (up to 3 currently supported).
+**iconic** solves problems for your Desktop and adds extra functionality:
+
+-   Move all icons to any one of three monitors
+-   Define a grid size to spread icons evenly across desktop as close or far apart as you prefer
+-   Do not suffer the "lost icon syndrome" that occurs when monitors of multiple resolutions are used
+-   Sort icons alphabetically, alphabetically with "Link to" prefix ignored, sort by modified date ascending or date descending
+-   Allow different grid size (columns x rows) depending on monitor, EG more on 4K monitor than 2K monitor
+-   Instant Test button for quick experimentation on column x row changes or reserved space changes for monitor left, top, right or bottom areas
+-   Test button will last for x seconds defined by you, clear all windows before test and restore them after test
+-   Save icon configuration and load saved configuration - handy for different monitors at home and work
+-   Bash script for easy modifications
+
+## Usage
+
+**iconic** provides a Graphical User Interface (GUI) and a Command Line Interface (CLI).
+
+For GUI simply type `iconic` from the command line or have it defined via desktop shortcut.
+
+You can pass parameters in GUI mode thusly:
+
+- `iconic --geometry=WidthxHeight+Xoffset+Yoffset window-icon-name`
+
+Two options are available for CLI:
+
+- `iconic -q` will list current configuration to the screen
+- `iconic #` will move icons to monitor # which must be between 1 and 3 inclusive
+
+## The "Test" button
+
+This button appears on two screens and best illustrates **iconic** in action:
+
+![iconic 9 optimized.gif](https://i.stack.imgur.com/bZk4z.gif)
 
 ## iconic Main Menu
 
