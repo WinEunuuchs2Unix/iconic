@@ -9,7 +9,7 @@
 #       For Ask Ubuntu Question:
 #       https://askubuntu.com/questions/1146175/desktop-icons-just-dropped-down-left-screen-into-never-never-land
 
-# DATE: May 25, 2019. Last modified June 8, 2019.
+# DATE: May 25, 2019. Modfied June 2, 2020.
 
 # UPDT: 2019-06-02 Last row was appearing in next column top row.
 #       2019-06-04 Apply button-remove "Are you sure..." message.
@@ -18,6 +18,9 @@
 #       2019-06-08 Add support for CLI features:
 #           iconic -q (list current settings)
 #           iconic #  (move desktop icons to monitor 1 to 3)
+#       2019-08-05 Ubuntu 19.04 --active-tab breaks monitors notebook.
+#       2019-11-04 Make icon name searchable in Sort Icons scroll box.
+#       2020-06-02 Clean up some comments.
 
 # NOTE: You can setup "~/Desktop/iconic.desktop" with +x bit set like so:
 
@@ -582,6 +585,7 @@ BuildMonitorPage () {
 
 } # BuildMonitorPage
 
+
 AddEmptyCfgFields () {
 
     # Add empty fields to Configuration File
@@ -666,7 +670,7 @@ MoveOneIcon () {
     Selected=$(yad --list --radiolist \
         --image="$ICON" --window-icon="$ICON" \
         --separator="|" \
-        --margins=10 --no-click \
+        --margins=10 --no-click --search-column=4 \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - $INSTRUCTIONS" \
         --column "Select" \
@@ -738,7 +742,7 @@ SortIconsList () {
         INSTRUCTIONS="Click Icon to move and press Enter"
         Selected=$(yad --list --radiolist \
         --image="$ICON" --window-icon="$ICON" \
-        --margins=10 --no-click \
+        --margins=10 --no-click  --search-column=4 \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - $INSTRUCTIONS" \
         --column "Select" \
@@ -830,7 +834,7 @@ GetMonitorTabs () {
 
     # run main dialog TODO: Need Cancel / Apply / Test buttons
     yad --notebook --key=$KEY --tab="General" --tab="Monitor 1" \
-        --tab="Monitor 2" --tab="Monitor 3" --active-tab="Desktop Icons" \
+        --tab="Monitor 2" --tab="Monitor 3" \
         --image="$ICON" --image-on-top \
         --title="$TITLE" "${GEOMETRY[@]}" \
         --text="<big><b>$TEXT</b></big> - Edit Configuration" \
