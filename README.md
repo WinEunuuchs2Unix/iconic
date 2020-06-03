@@ -15,6 +15,18 @@
 
 ## Usage
 
+**Prerequisites***
+
+Prior to running **iconic** open a terminal and install prerequisites with:
+
+- `sudo apt install wmctrl xdotool yad`
+
+Copy the **iconic** bash script to a directory in your path and make it executable with:
+
+- `chmod a+x /path/to/iconic`
+
+Where `/path/to/` is the name of the directory you placed the **iconic** bash script.
+
 **iconic** provides a Graphical User Interface (GUI) and a Command Line Interface (CLI).
 
 For GUI simply type `iconic` from the command line or have it defined via desktop shortcut.
